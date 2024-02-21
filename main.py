@@ -3,6 +3,7 @@ import mailparser
 import aiohttp
 import aioimaplib
 from config_reader import HOST, USER, PASSWORD, OPEN_AI_SECRET_KEY
+from openai import OpenAI
 import json
 from string import Template
 from email_reply_parser import EmailReplyParser
@@ -12,6 +13,12 @@ import smtplib
 from email.message import EmailMessage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+ASSISTANTS = {
+    'captain': 'asst_nCFYjknlZW8oGxPw7b9MnrDn',
+    'steve': 'asst_fXiEVWUohKAlfFipRwfZRtNV',
+    'librarian':'asst_McYq9xd4R8S7avhGxlfeO6aV'
+}
 
 PREAMBLE = Template('''
     You are responding to emails from inquiring children. You'll be reading in mostly
@@ -35,6 +42,43 @@ OPENAI_HEADERS = {
     "Content-Type": "application/json",
     "Authorization": "Bearer " + openai_api_key,
 }
+
+async def openai_get_assistant_response(assistant_name, user_message, prev_messages=None):
+    client = OpenAI(api_key=openai_api_key)
+    thread = client.beta.threads.create()
+    assistant_id = ASSISTANTS[assistant_name]
+
+    #todo: make previous messages useful
+
+    message = client.beta.threads.messages.create(
+        thread_id=thread.id,
+        role="user",
+        content=user_message
+    )
+    print(message)
+    run = client.beta.threads.runs.create(
+        thread_id=thread.id,
+        assistant_id=assistant_id,
+    )
+
+    while run.status != "completed":
+        keep_retrieving_run = client.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id
+        )
+        print(f"Run status: {keep_retrieving_run.status}")
+
+        if keep_retrieving_run.status == "completed":
+            print("\n")
+            break
+
+    # Retrieve messages added by the Assistant to the thread
+    all_messages = client.beta.threads.messages.list(
+        thread_id=thread.id
+    )
+
+    print(f"ASSISTANT: {all_messages.data[0].content[0].text.value}")
+    return all_messages.data[0].content[0].text.value
 
 async def openai_get_chat_completion(prompt,model='gpt-3.5-turbo-16k-0613',temp=0.3,max_tokens=256,timeout=20, validation_func=lambda x:x, prev_messages=None):
     url = "https://api.openai.com/v1/chat/completions"
@@ -86,14 +130,15 @@ async def openai_get_chat_completion(prompt,model='gpt-3.5-turbo-16k-0613',temp=
     
     return True, validated_result
 
-async def respondEmail(response, orig_email):
-    from_addr = 'askgptmail@gmail.com'
+async def respondEmail(from_email, response, orig_email):
+    print(from_email)
+    from_addr = from_email[0][1]
     to_addr = orig_email.from_[0][1]
     thread_id = orig_email.message_id
     thread_subject = orig_email.subject
     msg = EmailMessage()
     msg = MIMEMultipart('alternative')
-    html_message = MIMEText(response[1], 'html')
+    html_message = MIMEText(response, 'html')
     msg.attach(html_message)
 
     if 're:' not in thread_subject.lower():
@@ -109,29 +154,19 @@ async def respondEmail(response, orig_email):
         smtp_server.send_message(msg)
 
 
-async def processUnread(user_info, body):
+async def processUnread(to, user_info, body):
     name = user_info[0][0]
-    system_prompt = PREAMBLE.substitute(full_name=name)
     all_body = body[0]
 
     reply = EmailReplyParser.parse_reply(all_body)
     thread_history = all_body[len(reply)::]
 
-    messages = [
-        {
-            "role":"system",
-            "content":system_prompt
-        }
-    ]
     
-    messages.append(
-        {
-            "role":"assistant",
-            "content":thread_history
-        }
-    )
-
-    response = await openai_get_chat_completion(reply, prev_messages=messages)
+    assistant_name = to[0][1].split('@')[0]
+    print(assistant_name)
+    if assistant_name not in ASSISTANTS:
+        return None
+    response = await openai_get_assistant_response(assistant_name, reply, prev_messages=thread_history)
     return response
 
 async def imap_loop(host, user, password) -> None:
@@ -157,14 +192,16 @@ async def imap_loop(host, user, password) -> None:
             iterator = iter(response.lines[:-1])
             for start, middle, _end in zip(iterator, iterator, iterator):
                 parsed_email = mailparser.parse_from_bytes(middle)
-                print(parsed_email.message_id)
+                print(parsed_email.to)
                 print(parsed_email.subject)
                 print(parsed_email.from_)
                 print(parsed_email.text_plain)
-                response = await processUnread(parsed_email.from_, parsed_email.text_plain)
-                if len(response) > 0:
+                print('message id::::')
+                print(parsed_email.message_id)
+                response = await processUnread(parsed_email.to, parsed_email.from_, parsed_email.text_plain)
+                if (response is not None) and len(response) > 0:
                     print(response)
-                    await respondEmail(response, parsed_email)
+                    await respondEmail(parsed_email.to, response, parsed_email)
         idle_task = await imap_client.idle_start(timeout=60)
         await imap_client.wait_server_push()
         imap_client.idle_done()
