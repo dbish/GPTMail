@@ -130,10 +130,11 @@ async def openai_get_chat_completion(prompt,model='gpt-3.5-turbo-16k-0613',temp=
     
     return True, validated_result
 
-async def respondEmail(from_email, response, orig_email):
+async def respondEmail(from_email, to_email, response, orig_email):
     print(from_email)
     from_addr = from_email[0][1]
-    to_addr = orig_email.from_[0][1]
+    to_addr = to_email[0][1]
+    print('to: ' + to_addr)
     thread_id = orig_email.message_id
     thread_subject = orig_email.subject
     msg = EmailMessage()
@@ -194,14 +195,18 @@ async def imap_loop(host, user, password) -> None:
                 parsed_email = mailparser.parse_from_bytes(middle)
                 print(parsed_email.to)
                 print(parsed_email.subject)
-                print(parsed_email.from_)
+                from_email = parsed_email.from_
+                if len(parsed_email.reply_to) > 0:
+                    from_email = parsed_email.reply_to
+                print('from email::::')
+                print(from_email)
                 print(parsed_email.text_plain)
                 print('message id::::')
                 print(parsed_email.message_id)
-                response = await processUnread(parsed_email.to, parsed_email.from_, parsed_email.text_plain)
+                response = await processUnread(parsed_email.to, from_email, parsed_email.text_plain)
                 if (response is not None) and len(response) > 0:
                     print(response)
-                    await respondEmail(parsed_email.to, response, parsed_email)
+                    await respondEmail(parsed_email.to, from_email, response, parsed_email)
         idle_task = await imap_client.idle_start(timeout=60)
         await imap_client.wait_server_push()
         imap_client.idle_done()
